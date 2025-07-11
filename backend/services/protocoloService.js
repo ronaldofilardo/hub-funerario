@@ -1,7 +1,6 @@
 const pool = require('../db');
 
 class ProtocoloService {
-  // O construtor recebe as dependências necessárias
   constructor(notificationService) {
     this.notificationService = notificationService;
   }
@@ -23,26 +22,14 @@ class ProtocoloService {
     }
   }
 
-  async listarTodos() {
-    const { rows } = await pool.query('SELECT * FROM protocolos ORDER BY data_criacao DESC;');
-    return rows;
-  }
-
-  async buscarPorId(id) {
-    const { rows } = await pool.query('SELECT * FROM protocolos WHERE id = $1;', [id]);
-    if (rows.length === 0) {
-      const error = new Error('Protocolo não encontrado.');
-      error.statusCode = 404;
-      throw error;
-    }
-    return rows[0];
-  }
-  
-  async criarProtocolo(dados, arquivos) {
+  // NOVO MÉTODO DE CRIAÇÃO
+  async criarProtocolo(dados, arquivos, usuarioLogado) {
     const {
       nome_completo_falecido, data_nascimento_falecido, nome_mae_falecido, cpf_falecido,
-      criador_id, grupo_id, data_obito, data_sepultamento, decl_id
+      grupo_id, data_obito, data_sepultamento, decl_id
     } = dados;
+    
+    const criador_id = usuarioLogado.id;
 
     if (!arquivos || !arquivos.declaracao_obito) {
       const error = new Error('O upload da declaração de óbito é obrigatório.');
@@ -73,9 +60,9 @@ class ProtocoloService {
 
       await client.query('COMMIT');
 
-      // Dispara as notificações
-      this.notificationService.enviarParaUsuario(
-        novoProtocolo.grupo_id,
+      const canalTriagem = `grupo_${novoProtocolo.grupo_id}`;
+      this.notificationService.enviarParaCanal(
+        canalTriagem,
         'NOVO_PROTOCOLO_VALIDACAO',
         { protocoloId: novoProtocolo.id, mensagem: `Novo protocolo #${novoProtocolo.id.substring(0,8)} aguardando sua validação.` }
       );
@@ -99,6 +86,22 @@ class ProtocoloService {
     }
   }
 
+  // ... (todos os outros métodos como listarTodos, buscarPorId, etc., permanecem os mesmos)
+  async listarTodos() {
+    const { rows } = await pool.query('SELECT * FROM protocolos ORDER BY data_criacao DESC;');
+    return rows;
+  }
+
+  async buscarPorId(id) {
+    const { rows } = await pool.query('SELECT * FROM protocolos WHERE id = $1;', [id]);
+    if (rows.length === 0) {
+      const error = new Error('Protocolo não encontrado.');
+      error.statusCode = 404;
+      throw error;
+    }
+    return rows[0];
+  }
+
   async atualizarParcialmente(id, campos) {
     const chaves = Object.keys(campos);
     if (chaves.length === 0) {
@@ -117,95 +120,166 @@ class ProtocoloService {
     return rows[0];
   }
 
-  async confirmarValidacao(id) {
-    const client = await pool.connect();
-    try {
-      await client.query('BEGIN');
-      const res = await client.query('SELECT status FROM protocolos WHERE id = $1 FOR UPDATE;', [id]);
-      if (res.rows.length === 0) throw new Error('Protocolo não encontrado.');
-      if (res.rows[0].status !== 'aguardando_validacao') throw new Error('Transição de estado inválida.');
-      
-      const { rows } = await client.query(`UPDATE protocolos SET status = 'aguardando_comparecimento' WHERE id = $1 RETURNING *;`, [id]);
-      await client.query('COMMIT');
-      return rows[0];
-    } catch (error) {
-      await client.query('ROLLBACK');
-      throw error;
-    } finally {
-      client.release();
+  async confirmarValidacao(protocoloId, usuarioLogado) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    
+    // GUARD DE AUTORIZAÇÃO (Simulação de Papel 'Triagem')
+    // Assumimos que qualquer usuário da Triagem pode validar qualquer protocolo do seu grupo.
+    // Por enquanto, vamos simular que o usuário com ID 5 é uma Triagem.
+    if (usuarioLogado.id !== 5) {
+        const error = new Error('Acesso negado. Apenas a Triagem pode confirmar a validação.');
+        error.statusCode = 403; // Forbidden
+        throw error;
     }
-  }
 
-  async designarStakeholders(id, fun_id, cart_id) {
-    const client = await pool.connect();
-    try {
-      await client.query('BEGIN');
-      const res = await client.query('SELECT status FROM protocolos WHERE id = $1 FOR UPDATE;', [id]);
-      if (res.rows.length === 0) throw new Error('Protocolo não encontrado.');
-      if (res.rows[0].status !== 'aguardando_comparecimento') throw new Error('Transição de estado inválida.');
-
-      const { rows } = await client.query(`UPDATE protocolos SET fun_id = $1, cart_id = $2, status = 'aguardando_assinaturas_para_FAF' WHERE id = $3 RETURNING *;`, [fun_id, cart_id, id]);
-      await client.query('COMMIT');
-      return rows[0];
-    } catch (error) {
-      await client.query('ROLLBACK');
-      throw error;
-    } finally {
-      client.release();
+    const res = await client.query('SELECT status FROM protocolos WHERE id = $1 FOR UPDATE;', [protocoloId]);
+    if (res.rows.length === 0) {
+        const error = new Error('Protocolo não encontrado.');
+        error.statusCode = 404;
+        throw error;
     }
+    if (res.rows[0].status !== 'aguardando_validacao') {
+        const error = new Error('Ação inválida para o estado atual do protocolo.');
+        error.statusCode = 409; // Conflict
+        throw error;
+    }
+    
+    const { rows } = await client.query(`UPDATE protocolos SET status = 'aguardando_comparecimento' WHERE id = $1 RETURNING *;`, [protocoloId]);
+    await client.query('COMMIT');
+    return rows[0];
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
   }
+}
+
+
+  async designarStakeholders(protocoloId, fun_id, cart_id, usuarioLogado) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // GUARD DE AUTORIZAÇÃO (Simulação de Papel 'Triagem')
+    if (usuarioLogado.id !== 5) {
+        const error = new Error('Acesso negado. Apenas a Triagem pode designar stakeholders.');
+        error.statusCode = 403;
+        throw error;
+    }
+
+    const res = await client.query('SELECT status FROM protocolos WHERE id = $1 FOR UPDATE;', [protocoloId]);
+    if (res.rows.length === 0) {
+        const error = new Error('Protocolo não encontrado.');
+        error.statusCode = 404;
+        throw error;
+    }
+    if (res.rows[0].status !== 'aguardando_comparecimento') {
+        const error = new Error('Ação inválida para o estado atual do protocolo.');
+        error.statusCode = 409;
+        throw error;
+    }
+
+    const { rows } = await client.query(`UPDATE protocolos SET fun_id = $1, cart_id = $2, status = 'aguardando_assinaturas_para_FAF' WHERE id = $3 RETURNING *;`, [fun_id, cart_id, protocoloId]);
+    await client.query('COMMIT');
+    return rows[0];
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
   
-  async enviarFaf(id, fafFile) {
-    const client = await pool.connect();
-    try {
-        await client.query('BEGIN');
-        const res = await client.query('SELECT status FROM protocolos WHERE id = $1 FOR UPDATE;', [id]);
-        if (res.rows.length === 0) throw new Error('Protocolo não encontrado.');
-        if (res.rows[0].status !== 'aguardando_assinaturas_para_FAF') throw new Error('Transição de estado inválida.');
+  async enviarFaf(protocoloId, fafFile, usuarioLogado) {
+  const client = await pool.connect();
+  try {
+      await client.query('BEGIN');
 
-        await client.query(`INSERT INTO documentos (protocolo_id, tipo_documento, caminho_arquivo, nome_original, mimetype, tamanho_bytes) VALUES ($1, $2, $3, $4, $5, $6);`, [id, 'faf', fafFile.path, fafFile.originalname, fafFile.mimetype, fafFile.size]);
-        const { rows } = await client.query(`UPDATE protocolos SET status = 'em_execucao_paralela', status_documentacao = 'aguardando_minuta' WHERE id = $1 RETURNING *;`, [id]);
-        
-        await client.query('COMMIT');
-        return rows[0];
-    } catch (error) {
-        await client.query('ROLLBACK');
-        throw error;
-    } finally {
-        client.release();
-    }
+      // GUARD DE AUTORIZAÇÃO (Simulação de Papel 'Triagem')
+      if (usuarioLogado.id !== 5) {
+          const error = new Error('Acesso negado. Apenas a Triagem pode enviar a FAF.');
+          error.statusCode = 403;
+          throw error;
+      }
+
+      const res = await client.query('SELECT status FROM protocolos WHERE id = $1 FOR UPDATE;', [protocoloId]);
+      if (res.rows.length === 0) {
+          const error = new Error('Protocolo não encontrado.');
+          error.statusCode = 404;
+          throw error;
+      }
+      if (res.rows[0].status !== 'aguardando_assinaturas_para_FAF') {
+          const error = new Error('Ação inválida para o estado atual do protocolo.');
+          error.statusCode = 409;
+          throw error;
+      }
+
+      await client.query(`INSERT INTO documentos (protocolo_id, tipo_documento, caminho_arquivo, nome_original, mimetype, tamanho_bytes) VALUES ($1, $2, $3, $4, $5, $6);`, [protocoloId, 'faf', fafFile.path, fafFile.originalname, fafFile.mimetype, fafFile.size]);
+      const { rows } = await client.query(`UPDATE protocolos SET status = 'em_execucao_paralela', status_documentacao = 'aguardando_minuta' WHERE id = $1 RETURNING *;`, [protocoloId]);
+      
+      await client.query('COMMIT');
+      return rows[0];
+  } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+  } finally {
+      client.release();
   }
+}
 
-  async atualizarProgressoFuneral(id, campos) {
-    const client = await pool.connect();
-    try {
-        await client.query('BEGIN');
-        const res = await client.query('SELECT status FROM protocolos WHERE id = $1 FOR UPDATE;', [id]);
-        if (res.rows.length === 0) throw new Error('Protocolo não encontrado.');
-        if (res.rows[0].status !== 'em_execucao_paralela') throw new Error('Ação inválida para o estado atual.');
+  async atualizarProgressoFuneral(protocoloId, campos, usuarioLogado) {
+  const client = await pool.connect();
+  try {
+      await client.query('BEGIN');
+      
+      const res = await client.query('SELECT status, fun_id FROM protocolos WHERE id = $1 FOR UPDATE;', [protocoloId]);
+      if (res.rows.length === 0) {
+          const error = new Error('Protocolo não encontrado.');
+          error.statusCode = 404;
+          throw error;
+      }
+      
+      const { status, fun_id } = res.rows[0];
 
-        const chaves = Object.keys(campos);
-        const setString = chaves.map((chave, index) => `"${chave}" = $${index + 2}`).join(', ');
-        const upsertQuery = `INSERT INTO progresso_funeral (protocolo_id, ${chaves.join(', ')}) VALUES ($1, ${chaves.map((_, i) => `$${i + 2}`).join(', ')}) ON CONFLICT (protocolo_id) DO UPDATE SET ${setString} RETURNING *;`;
-        const valores = [id, ...Object.values(campos)];
-        const progressoResult = await client.query(upsertQuery, valores);
+      // GUARD DE AUTORIZAÇÃO
+      if (usuarioLogado.id !== fun_id) {
+          const error = new Error('Acesso negado. Você não é a funerária designada para este protocolo.');
+          error.statusCode = 403;
+          throw error;
+      }
 
-        if (campos.status_sepultamento === 'realizado') {
-            await client.query(`UPDATE protocolos SET status_sepultamento = 'concluido' WHERE id = $1;`, [id]);
-        }
+      // GUARD DE ESTADO
+      if (status !== 'em_execucao_paralela') {
+          const error = new Error('Ação inválida para o estado atual do protocolo.');
+          error.statusCode = 409;
+          throw error;
+      }
 
-        await this._verificarEFinalizarProtocolo(id, client);
-        await client.query('COMMIT');
-        
-        const protocoloFinal = await this.buscarPorId(id);
-        return { progresso: progressoResult.rows[0], protocolo: protocoloFinal };
-    } catch (error) {
-        await client.query('ROLLBACK');
-        throw error;
-    } finally {
-        client.release();
-    }
+      const chaves = Object.keys(campos);
+      const setString = chaves.map((chave, index) => `"${chave}" = $${index + 2}`).join(', ');
+      const upsertQuery = `INSERT INTO progresso_funeral (protocolo_id, ${chaves.join(', ')}) VALUES ($1, ${chaves.map((_, i) => `$${i + 2}`).join(', ')}) ON CONFLICT (protocolo_id) DO UPDATE SET ${setString} RETURNING *;`;
+      const valores = [protocoloId, ...Object.values(campos)];
+      const progressoResult = await client.query(upsertQuery, valores);
+
+      if (campos.status_sepultamento === 'realizado') {
+          await client.query(`UPDATE protocolos SET status_sepultamento = 'concluido' WHERE id = $1;`, [protocoloId]);
+      }
+
+      await this._verificarEFinalizarProtocolo(protocoloId, client);
+      await client.query('COMMIT');
+      
+      const protocoloFinal = await this.buscarPorId(protocoloId);
+      return { progresso: progressoResult.rows[0], protocolo: protocoloFinal };
+  } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+  } finally {
+      client.release();
   }
+}
 
   async enviarMinuta(id, minutaFile) {
     const client = await pool.connect();
@@ -357,6 +431,6 @@ class ProtocoloService {
         client.release();
     }
   }
-} // <<< ESTA CHAVE ESTAVA FALTANDO
+}
 
 module.exports = ProtocoloService;

@@ -1,13 +1,13 @@
 const express = require('express');
 const cors = require('cors');
 const http = require('http' );
-const { initSocket } = require('./socket'); // <<< IMPORTA A FUNÇÃO DE INICIALIZAÇÃO
+const { initSocket } = require('./socket');
 
 const app = express();
 const server = http.createServer(app );
 
-// Inicializa o Socket.IO usando o módulo separado
-initSocket(server);
+// Inicializa o Socket.IO e exporta a instância
+const io = initSocket(server);
 
 const PORT = 3001;
 
@@ -19,6 +19,28 @@ const authSimulado = require('./middleware/authSimulado');
 // --- Middlewares Globais ---
 app.use(cors());
 app.use(express.json());
+
+// --- Lógica do Socket.io ---
+io.on('connection', (socket) => {
+  console.log(`Usuário conectado com ID do socket: ${socket.id}`);
+
+  socket.on('join_room', (userId) => {
+    const roomName = `user_${userId}`;
+    socket.join(roomName);
+    console.log(`Socket ${socket.id} entrou no canal: ${roomName}`);
+  });
+
+  // Novo listener para entrar em canais de grupo
+  socket.on('join_group_room', (groupId) => {
+    const roomName = `grupo_${groupId}`;
+    socket.join(roomName);
+    console.log(`Socket ${socket.id} entrou no canal de grupo: ${roomName}`);
+  });
+
+  socket.on('disconnect', () => {
+    console.log(`Usuário desconectado com ID do socket: ${socket.id}`);
+  });
+});
 
 // --- Rota de Verificação de Saúde ---
 app.get('/', (req, res) => {
