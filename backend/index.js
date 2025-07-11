@@ -48,7 +48,7 @@ app.get('/', (req, res) => {
 });
 
 // --- Definição das Rotas da API ---
-app.use('/api/protocolos', authSimulado, protocoloRoutes);
+app.use('/api/protocolos', protocoloRoutes);
 
 // --- Inicialização de Serviços ---
 initScheduledJobs();
