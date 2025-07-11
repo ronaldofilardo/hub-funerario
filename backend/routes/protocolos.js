@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const pool = require('../db');
 const upload = require('../multerConfig');
+const notificationService = require('../services/notificationService'); // <<< 1. IMPORTAR O SERVIÇO
 
 // =============================================================================
 // CAMADA DE SERVIÇO (Lógica de Negócio e Banco de Dados)
@@ -152,17 +153,36 @@ class ProtocoloService {
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
-        const res = await client.query('SELECT status, status_documentacao FROM protocolos WHERE id = $1 FOR UPDATE;', [id]);
+        
+        // <<< Precisamos buscar o decl_id para saber para quem enviar a notificação
+        const res = await client.query('SELECT status, status_documentacao, decl_id FROM protocolos WHERE id = $1 FOR UPDATE;', [id]);
+        
         if (res.rows.length === 0) throw new Error('Protocolo não encontrado.');
-        const { status, status_documentacao } = res.rows[0];
+        
+        const { status, status_documentacao, decl_id } = res.rows[0];
+        
         if (status !== 'em_execucao_paralela' || !['nao_iniciado', 'aguardando_minuta', 'aguardando_retificacao'].includes(status_documentacao)) {
             throw new Error('Ação inválida para o estado atual.');
         }
 
         await client.query(`INSERT INTO documentos (protocolo_id, tipo_documento, caminho_arquivo, nome_original, mimetype, tamanho_bytes) VALUES ($1, $2, $3, $4, $5, $6);`, [id, 'minuta', minutaFile.path, minutaFile.originalname, minutaFile.mimetype, minutaFile.size]);
+        
         const { rows } = await client.query(`UPDATE protocolos SET status_documentacao = 'aguardando_aprovacao_decl' WHERE id = $1 RETURNING *;`, [id]);
         
         await client.query('COMMIT');
+
+        // <<< 2. CHAMAR O SERVIÇO DE NOTIFICAÇÃO APÓS O SUCESSO
+        if (decl_id) {
+          notificationService.enviarParaUsuario(
+            decl_id, 
+            'NOVA_MINUTA', // Nome do evento
+            { 
+              protocoloId: id,
+              mensagem: `Você recebeu uma nova minuta para aprovação no protocolo ${id}.`
+            }
+          );
+        }
+        
         return rows[0];
     } catch (error) {
         await client.query('ROLLBACK');
@@ -172,18 +192,36 @@ class ProtocoloService {
     }
   }
 
-  async aceitarMinuta(id) {
+  // <<< INÍCIO DA ALTERAÇÃO 19.2
+  async aceitarMinuta(protocoloId, usuarioLogado) {
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
-        const res = await client.query('SELECT status, status_documentacao FROM protocolos WHERE id = $1 FOR UPDATE;', [id]);
-        if (res.rows.length === 0) throw new Error('Protocolo não encontrado.');
-        const { status, status_documentacao } = res.rows[0];
-        if (status !== 'em_execucao_paralela' || status_documentacao !== 'aguardando_aprovacao_decl') {
-            throw new Error('Ação inválida para o estado atual.');
+        
+        const protocoloQuery = 'SELECT status, status_documentacao, decl_id FROM protocolos WHERE id = $1 FOR UPDATE;';
+        const protocoloResult = await client.query(protocoloQuery, [protocoloId]);
+
+        if (protocoloResult.rows.length === 0) {
+            throw new Error('Protocolo não encontrado.');
         }
 
-        const { rows } = await client.query(`UPDATE protocolos SET status_documentacao = 'aguardando_emissao_certidao' WHERE id = $1 RETURNING *;`, [id]);
+        const { status, status_documentacao, decl_id } = protocoloResult.rows[0];
+
+        // GUARD DE AUTORIZAÇÃO
+        if (usuarioLogado.id !== decl_id) {
+            const error = new Error('Acesso negado. Apenas o declarante do protocolo pode aceitar a minuta.');
+            error.statusCode = 403; // Forbidden
+            throw error;
+        }
+
+        // GUARD DE ESTADO
+        if (status !== 'em_execucao_paralela' || status_documentacao !== 'aguardando_aprovacao_decl') {
+            const error = new Error('Ação inválida para o estado atual do protocolo.');
+            error.statusCode = 409; // Conflict
+            throw error;
+        }
+
+        const { rows } = await client.query(`UPDATE protocolos SET status_documentacao = 'aguardando_emissao_certidao' WHERE id = $1 RETURNING *;`, [protocoloId]);
         await client.query('COMMIT');
         return rows[0];
     } catch (error) {
@@ -194,17 +232,42 @@ class ProtocoloService {
     }
   }
 
-  async recusarMinuta(id, observacoes) {
+  async recusarMinuta(protocoloId, observacoes, usuarioLogado) {
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
-        const res = await client.query('SELECT status, status_documentacao, minuta_recusas_count FROM protocolos WHERE id = $1 FOR UPDATE;', [id]);
-        if (res.rows.length === 0) throw new Error('Protocolo não encontrado.');
-        const { status, status_documentacao, minuta_recusas_count } = res.rows[0];
-        if (status !== 'em_execucao_paralela' || status_documentacao !== 'aguardando_aprovacao_decl') throw new Error('Ação inválida para o estado atual.');
-        if (minuta_recusas_count >= 1) throw new Error('Limite de recusas da minuta atingido.');
+        
+        const protocoloQuery = 'SELECT status, status_documentacao, decl_id, minuta_recusas_count FROM protocolos WHERE id = $1 FOR UPDATE;';
+        const protocoloResult = await client.query(protocoloQuery, [protocoloId]);
 
-        const { rows } = await client.query(`UPDATE protocolos SET status_documentacao = 'aguardando_retificacao', minuta_recusas_count = minuta_recusas_count + 1 WHERE id = $1 RETURNING *;`, [id]);
+        if (protocoloResult.rows.length === 0) {
+            throw new Error('Protocolo não encontrado.');
+        }
+
+        const { status, status_documentacao, decl_id, minuta_recusas_count } = protocoloResult.rows[0];
+
+        // GUARD DE AUTORIZAÇÃO
+        if (usuarioLogado.id !== decl_id) {
+            const error = new Error('Acesso negado. Apenas o declarante do protocolo pode recusar a minuta.');
+            error.statusCode = 403;
+            throw error;
+        }
+
+        // GUARD DE ESTADO
+        if (status !== 'em_execucao_paralela' || status_documentacao !== 'aguardando_aprovacao_decl') {
+            const error = new Error('Ação inválida para o estado atual do protocolo.');
+            error.statusCode = 409;
+            throw error;
+        }
+
+        // GUARD DE REGRA DE NEGÓCIO
+        if (minuta_recusas_count >= 1) {
+            const error = new Error('Limite de recusas da minuta atingido.');
+            error.statusCode = 403;
+            throw error;
+        }
+
+        const { rows } = await client.query(`UPDATE protocolos SET status_documentacao = 'aguardando_retificacao', minuta_recusas_count = minuta_recusas_count + 1 WHERE id = $1 RETURNING *;`, [protocoloId]);
         await client.query('COMMIT');
         return rows[0];
     } catch (error) {
@@ -214,6 +277,7 @@ class ProtocoloService {
         client.release();
     }
   }
+  // <<< FIM DA ALTERAÇÃO 19.2
 
   async definirPrevisaoRetirada(id, data_previsao_retirada) {
     const client = await pool.connect();
@@ -350,9 +414,10 @@ class ProtocoloController {
     }
   }
 
+  // <<< INÍCIO DA ALTERAÇÃO 19.3
   async aceitarMinuta(req, res) {
     try {
-        const protocolo = await protocoloService.aceitarMinuta(req.params.id);
+        const protocolo = await protocoloService.aceitarMinuta(req.params.id, req.user);
         res.status(200).json({ message: "Minuta aceita com sucesso. Cartório notificado para prosseguir.", protocolo });
     } catch (error) {
         this._handleError(res, error);
@@ -363,12 +428,13 @@ class ProtocoloController {
     try {
         const { observacoes } = req.body;
         if (!observacoes || observacoes.trim() === '') return res.status(400).json({ error: 'As observações para a recusa são obrigatórias.' });
-        const protocolo = await protocoloService.recusarMinuta(req.params.id, observacoes);
+        const protocolo = await protocoloService.recusarMinuta(req.params.id, observacoes, req.user);
         res.status(200).json({ message: "Minuta recusada com sucesso. Cartório notificado para realizar as correções.", protocolo });
     } catch (error) {
         this._handleError(res, error);
     }
   }
+  // <<< FIM DA ALTERAÇÃO 19.3
 
   async definirPrevisaoRetirada(req, res) {
     try {
@@ -406,6 +472,44 @@ const cpUpload = upload.fields([
 // Rota POST para CRIAR um novo protocolo (ainda não refatorada por causa do 'cpUpload')
 router.post('/', cpUpload, async (req, res) => {
     // ... (manter a lógica original por enquanto)
+    const {
+        nome_completo_falecido, data_nascimento_falecido, nome_mae_falecido, cpf_falecido,
+        criador_id, grupo_id, data_obito, data_sepultamento
+      } = req.body;
+      const arquivos = req.files;
+    
+      if (!arquivos || !arquivos.declaracao_obito) {
+        return res.status(400).json({ error: 'O upload da declaração de óbito é obrigatório.' });
+      }
+    
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+    
+        const falecidoQuery = `INSERT INTO falecidos (nome_completo, data_nascimento, nome_mae, cpf) VALUES ($1, $2, $3, $4) RETURNING id;`;
+        const falecidoResult = await client.query(falecidoQuery, [nome_completo_falecido, new Date(data_nascimento_falecido), nome_mae_falecido, cpf_falecido]);
+        const falecidoId = falecidoResult.rows[0].id;
+    
+        const protocoloQuery = `INSERT INTO protocolos (falecido_id, criador_id, grupo_id, status, data_obito, data_sepultamento) VALUES ($1, $2, $3, 'criando', $4, $5) RETURNING *;`;
+        const protocoloResult = await client.query(protocoloQuery, [falecidoId, Number(criador_id), Number(grupo_id), data_obito, data_sepultamento]);
+        const novoProtocolo = protocoloResult.rows[0];
+    
+        const docQuery = `INSERT INTO documentos (protocolo_id, tipo_documento, caminho_arquivo, nome_original, mimetype, tamanho_bytes) VALUES ($1, $2, $3, $4, $5, $6);`;
+        for (const fieldName in arquivos) {
+          const file = arquivos[fieldName][0];
+          await client.query(docQuery, [novoProtocolo.id, fieldName, file.path, file.originalname, file.mimetype, file.size]);
+        }
+    
+        await client.query('COMMIT');
+        res.status(201).json({ message: "Protocolo e documentos criados com sucesso!", protocolo: novoProtocolo });
+    
+      } catch (error) {
+        await client.query('ROLLBACK');
+        console.error('Erro ao criar protocolo com documentos:', error);
+        res.status(500).json({ error: 'Erro interno do servidor.' });
+      } finally {
+        client.release();
+      }
 });
 
 router.get('/', (req, res) => protocoloController.listarTodos(req, res));
