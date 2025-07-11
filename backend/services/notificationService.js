@@ -11,4 +11,4 @@ class NotificationService {
   }
 }
 
-module.exports = new NotificationService();
+module.exports = NotificationService;
