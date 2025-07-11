@@ -1,5 +1,4 @@
 const pool = require('../db');
-// A dependência será injetada, então não importamos notificationService aqui.
 
 class ProtocoloService {
   // O construtor recebe as dependências necessárias
@@ -37,6 +36,67 @@ class ProtocoloService {
       throw error;
     }
     return rows[0];
+  }
+  
+  async criarProtocolo(dados, arquivos) {
+    const {
+      nome_completo_falecido, data_nascimento_falecido, nome_mae_falecido, cpf_falecido,
+      criador_id, grupo_id, data_obito, data_sepultamento, decl_id
+    } = dados;
+
+    if (!arquivos || !arquivos.declaracao_obito) {
+      const error = new Error('O upload da declaração de óbito é obrigatório.');
+      error.statusCode = 400;
+      throw error;
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      const falecidoQuery = `INSERT INTO falecidos (nome_completo, data_nascimento, nome_mae, cpf) VALUES ($1, $2, $3, $4) RETURNING id;`;
+      const falecidoResult = await client.query(falecidoQuery, [nome_completo_falecido, new Date(data_nascimento_falecido), nome_mae_falecido, cpf_falecido]);
+      const falecidoId = falecidoResult.rows[0].id;
+
+      const protocoloQuery = `
+        INSERT INTO protocolos (falecido_id, criador_id, grupo_id, status, data_obito, data_sepultamento, decl_id) 
+        VALUES ($1, $2, $3, 'aguardando_validacao', $4, $5, $6) RETURNING *;
+      `;
+      const protocoloResult = await client.query(protocoloQuery, [falecidoId, Number(criador_id), Number(grupo_id), data_obito, data_sepultamento, Number(decl_id)]);
+      const novoProtocolo = protocoloResult.rows[0];
+
+      const docQuery = `INSERT INTO documentos (protocolo_id, tipo_documento, caminho_arquivo, nome_original, mimetype, tamanho_bytes) VALUES ($1, $2, $3, $4, $5, $6);`;
+      for (const fieldName in arquivos) {
+        const file = arquivos[fieldName][0];
+        await client.query(docQuery, [novoProtocolo.id, fieldName, file.path, file.originalname, file.mimetype, file.size]);
+      }
+
+      await client.query('COMMIT');
+
+      // Dispara as notificações
+      this.notificationService.enviarParaUsuario(
+        novoProtocolo.grupo_id,
+        'NOVO_PROTOCOLO_VALIDACAO',
+        { protocoloId: novoProtocolo.id, mensagem: `Novo protocolo #${novoProtocolo.id.substring(0,8)} aguardando sua validação.` }
+      );
+
+      if (novoProtocolo.decl_id) {
+        this.notificationService.enviarParaUsuario(
+          novoProtocolo.decl_id,
+          'PROTOCOLO_CRIADO_INFO',
+          { protocoloId: novoProtocolo.id, mensagem: `Um protocolo foi criado para você. Acompanhe o andamento.` }
+        );
+      }
+
+      return novoProtocolo;
+
+    } catch (error) {
+      await client.query('ROLLBACK');
+      console.error('Erro ao criar protocolo com documentos:', error);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async atualizarParcialmente(id, campos) {
@@ -297,6 +357,6 @@ class ProtocoloService {
         client.release();
     }
   }
-}
+} // <<< ESTA CHAVE ESTAVA FALTANDO
 
 module.exports = ProtocoloService;

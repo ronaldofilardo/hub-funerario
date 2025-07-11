@@ -10,7 +10,7 @@ const cpUpload = upload.fields([
     { name: 'doc_declarante', maxCount: 1 }
 ]);
 
-// A rota de criação ainda não foi refatorada para o service/controller para manter a simplicidade do 'cpUpload'
+// A rota de criação ainda não foi movida para o service/controller para manter a simplicidade do 'cpUpload'
 router.post('/', cpUpload, async (req, res) => {
     const {
         nome_completo_falecido, data_nascimento_falecido, nome_mae_falecido, cpf_falecido,
