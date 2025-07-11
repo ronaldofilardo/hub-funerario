@@ -4,6 +4,8 @@ const protocolosRouter = require('./routes/protocolos');
 const app = express();
 const PORT = 3001;
 
+const { initScheduledJobs } = require('./services/cronJobs');
+
 app.use(express.json());
 
 app.get('/', (req, res) => {
@@ -11,6 +13,8 @@ app.get('/', (req, res) => {
 });
 
 app.use('/api/protocolos', protocolosRouter);
+
+initScheduledJobs(); // Inicia as tarefas agendadas
 
 app.listen(PORT, () => {
   console.log(`Servidor rodando na porta ${PORT}.`);
