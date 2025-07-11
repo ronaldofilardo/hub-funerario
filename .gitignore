@@ -1,0 +1,17 @@
+# Arquivos e pastas a serem ignorados pelo Git
+
+# Dependencias
+node_modules/
+
+# Arquivos de ambiente
+.env
+
+# Logs
+npm-debug.log*
+
+# Arquivos de sistema operacional
+Thumbs.db
+.DS_Store
+
+# Pasta de uploads do backend
+/backend/uploads/
