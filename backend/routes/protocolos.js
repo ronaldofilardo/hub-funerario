@@ -3,13 +3,35 @@ const router = express.Router();
 const pool = require('../db');
 const upload = require('../multerConfig');
 
-// Define os campos de arquivo esperados para a rota de criação
+async function verificarEFinalizarProtocolo(protocoloId, client) {
+  const res = await client.query(
+    'SELECT status, status_documentacao, status_sepultamento FROM protocolos WHERE id = $1;',
+    [protocoloId]
+  );
+
+  if (res.rows.length === 0) {
+    return;
+  }
+
+  const { status, status_documentacao, status_sepultamento } = res.rows[0];
+
+  if (status === 'em_execucao_paralela' && status_documentacao === 'concluido' && status_sepultamento === 'concluido') {
+    await client.query(
+      "UPDATE protocolos SET status = 'finalizado' WHERE id = $1;",
+      [protocoloId]
+    );
+    console.log(`Protocolo ${protocoloId} transicionado para 'finalizado'.`);
+    // TODO: Disparar notificação geral de que o protocolo foi finalizado.
+  }
+}
+
 const cpUpload = upload.fields([
   { name: 'declaracao_obito', maxCount: 1 },
   { name: 'doc_falecido', maxCount: 1 },
   { name: 'doc_declarante', maxCount: 1 }
 ]);
 
+// ... (Rotas GET, POST, PATCH, confirmar-validacao, designar-stakeholders, enviar-faf - sem alterações) ...
 // Rota GET para LISTAR TODOS os protocolos
 router.get('/', async (req, res) => {
   try {
@@ -226,7 +248,8 @@ router.post('/:id/enviar-faf', upload.single('faf'), async (req, res) => {
 
     const updateQuery = `
       UPDATE protocolos
-      SET status = 'em_execucao_paralela'
+      SET status = 'em_execucao_paralela',
+          status_documentacao = 'aguardando_minuta'
       WHERE id = $1
       RETURNING *;
     `;
@@ -247,6 +270,7 @@ router.post('/:id/enviar-faf', upload.single('faf'), async (req, res) => {
     client.release();
   }
 });
+
 
 // Rota PATCH para a Funerária atualizar o progresso do funeral
 router.patch('/:id/progresso-funeral', async (req, res) => {
@@ -297,10 +321,18 @@ router.patch('/:id/progresso-funeral', async (req, res) => {
       console.log(`Sub-estado do protocolo ${protocoloId} atualizado para 'concluido'.`);
     }
 
+    // <<< ALTERAÇÃO AQUI: Chamada da função de verificação
+    await verificarEFinalizarProtocolo(protocoloId, client);
+
     await client.query('COMMIT');
+
+    // <<< ALTERAÇÃO AQUI: Busca o estado mais recente para retornar ao cliente
+    const protocoloFinal = await pool.query('SELECT * FROM protocolos WHERE id = $1', [protocoloId]);
+
     res.status(200).json({
       message: "Progresso do funeral atualizado com sucesso.",
-      progresso: progressoResult.rows[0]
+      progresso: progressoResult.rows[0],
+      protocolo: protocoloFinal.rows[0] // Retorna o protocolo com o estado potencialmente atualizado
     });
 
   } catch (error) {
@@ -312,7 +344,7 @@ router.patch('/:id/progresso-funeral', async (req, res) => {
   }
 });
 
-// NOVA ROTA DE AÇÃO para o Cartório enviar a minuta
+// ROTA DE AÇÃO para o Cartório enviar a minuta
 router.post('/:id/enviar-minuta', upload.single('minuta'), async (req, res) => {
   const { id: protocoloId } = req.params;
   const minutaFile = req.file;
@@ -334,7 +366,6 @@ router.post('/:id/enviar-minuta', upload.single('minuta'), async (req, res) => {
 
     const { status, status_documentacao } = protocoloResult.rows[0];
 
-    // "Guard" de Negócio: Ação permitida apenas no estado principal correto e sub-estado de documentação
     if (status !== 'em_execucao_paralela' || (status_documentacao !== 'nao_iniciado' && status_documentacao !== 'aguardando_minuta' && status_documentacao !== 'aguardando_retificacao')) {
       await client.query('ROLLBACK');
       return res.status(409).json({
@@ -343,21 +374,14 @@ router.post('/:id/enviar-minuta', upload.single('minuta'), async (req, res) => {
       });
     }
 
-    // 1. Insere o registro do documento na tabela 'documentos'
     const docQuery = `
       INSERT INTO documentos (protocolo_id, tipo_documento, caminho_arquivo, nome_original, mimetype, tamanho_bytes) 
       VALUES ($1, $2, $3, $4, $5, $6);
     `;
     await client.query(docQuery, [
-      protocoloId,
-      'minuta', // Tipo do documento
-      minutaFile.path,
-      minutaFile.originalname,
-      minutaFile.mimetype,
-      minutaFile.size
+      protocoloId, 'minuta', minutaFile.path, minutaFile.originalname, minutaFile.mimetype, minutaFile.size
     ]);
 
-    // 2. Atualiza o sub-estado de documentação do protocolo
     const updateQuery = `
       UPDATE protocolos
       SET status_documentacao = 'aguardando_aprovacao_decl'
@@ -376,6 +400,181 @@ router.post('/:id/enviar-minuta', upload.single('minuta'), async (req, res) => {
   } catch (error) {
     await client.query('ROLLBACK');
     console.error(`Erro ao enviar minuta para o protocolo ${protocoloId}:`, error);
+    res.status(500).json({ error: 'Erro interno do servidor.' });
+  } finally {
+    client.release();
+  }
+});
+
+// ROTA DE AÇÃO para o Declarante ACEITAR a minuta
+router.post('/:id/aceitar-minuta', async (req, res) => {
+  const { id: protocoloId } = req.params;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const protocoloQuery = 'SELECT status, status_documentacao, decl_id FROM protocolos WHERE id = $1 FOR UPDATE;';
+    const protocoloResult = await client.query(protocoloQuery, [protocoloId]);
+
+    if (protocoloResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Protocolo não encontrado.' });
+    }
+
+    const { status, status_documentacao, decl_id } = protocoloResult.rows[0];
+
+    if (status !== 'em_execucao_paralela' || status_documentacao !== 'aguardando_aprovacao_decl') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: 'Ação inválida.',
+        message: `Não é possível aceitar a minuta para um protocolo no estado "${status}" com sub-estado de documentação "${status_documentacao}".`
+      });
+    }
+
+    const updateQuery = `
+      UPDATE protocolos
+      SET status_documentacao = 'aguardando_emissao_certidao'
+      WHERE id = $1
+      RETURNING *;
+    `;
+    const protocoloAtualizado = await client.query(updateQuery, [protocoloId]);
+
+    await client.query('COMMIT');
+
+    res.status(200).json({
+      message: "Minuta aceita com sucesso. Cartório notificado para prosseguir.",
+      protocolo: protocoloAtualizado.rows[0]
+    });
+
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error(`Erro ao aceitar minuta para o protocolo ${protocoloId}:`, error);
+    res.status(500).json({ error: 'Erro interno do servidor.' });
+  } finally {
+    client.release();
+  }
+});
+
+// ROTA DE AÇÃO para o Cartório definir a previsão de retirada da certidão
+router.post('/:id/definir-previsao-retirada', async (req, res) => {
+  const { id: protocoloId } = req.params;
+  const { data_previsao_retirada } = req.body;
+
+  if (!data_previsao_retirada) {
+    return res.status(400).json({ error: 'O campo data_previsao_retirada é obrigatório.' });
+  }
+
+  if (isNaN(new Date(data_previsao_retirada).getTime())) {
+      return res.status(400).json({ error: 'Formato de data inválido para data_previsao_retirada.' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const protocoloQuery = 'SELECT status, status_documentacao FROM protocolos WHERE id = $1 FOR UPDATE;';
+    const protocoloResult = await client.query(protocoloQuery, [protocoloId]);
+
+    if (protocoloResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Protocolo não encontrado.' });
+    }
+
+    const { status, status_documentacao } = protocoloResult.rows[0];
+
+    if (status !== 'em_execucao_paralela' || status_documentacao !== 'aguardando_emissao_certidao') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: 'Ação inválida.',
+        message: `Não é possível definir a previsão de retirada para um protocolo no estado "${status}" com sub-estado de documentação "${status_documentacao}".`
+      });
+    }
+
+    const updateQuery = `
+      UPDATE protocolos
+      SET status_documentacao = 'aguardando_retirada_certidao',
+          data_previsao_retirada = $2
+      WHERE id = $1
+      RETURNING *;
+    `;
+    const protocoloAtualizado = await client.query(updateQuery, [protocoloId, data_previsao_retirada]);
+
+    await client.query('COMMIT');
+
+    res.status(200).json({
+      message: "Previsão de retirada da certidão definida com sucesso. Declarante notificado.",
+      protocolo: protocoloAtualizado.rows[0]
+    });
+
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error(`Erro ao definir previsão de retirada para o protocolo ${protocoloId}:`, error);
+    res.status(500).json({ error: 'Erro interno do servidor.' });
+  } finally {
+    client.release();
+  }
+});
+
+// ROTA DE AÇÃO para o Cartório anexar a certidão de óbito final
+router.post('/:id/anexar-certidao-final', upload.single('certidao_final'), async (req, res) => {
+  const { id: protocoloId } = req.params;
+  const certidaoFile = req.file;
+
+  if (!certidaoFile) {
+    return res.status(400).json({ error: 'O arquivo da certidão final é obrigatório.' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const protocoloQuery = 'SELECT status, status_documentacao FROM protocolos WHERE id = $1 FOR UPDATE;';
+    const protocoloResult = await client.query(protocoloQuery, [protocoloId]);
+
+    if (protocoloResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Protocolo não encontrado.' });
+    }
+
+    const { status, status_documentacao } = protocoloResult.rows[0];
+
+    if (status !== 'em_execucao_paralela' || status_documentacao !== 'aguardando_retirada_certidao') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: 'Ação inválida.',
+        message: `Não é possível anexar a certidão final para um protocolo no estado "${status}" com sub-estado de documentação "${status_documentacao}".`
+      });
+    }
+
+    const docQuery = `
+      INSERT INTO documentos (protocolo_id, tipo_documento, caminho_arquivo, nome_original, mimetype, tamanho_bytes) 
+      VALUES ($1, $2, $3, $4, $5, $6);
+    `;
+    await client.query(docQuery, [
+      protocoloId, 'certidao_final', certidaoFile.path, certidaoFile.originalname, certidaoFile.mimetype, certidaoFile.size
+    ]);
+
+    const updateQuery = `
+      UPDATE protocolos
+      SET status_documentacao = 'concluido'
+      WHERE id = $1
+      RETURNING *;
+    `;
+    await client.query(updateQuery, [protocoloId]);
+
+    // <<< ALTERAÇÃO AQUI: Chamada da função de verificação
+    await verificarEFinalizarProtocolo(protocoloId, client);
+
+    await client.query('COMMIT');
+
+    // <<< ALTERAÇÃO AQUI: Busca o estado mais recente para retornar ao cliente
+    const protocoloFinal = await pool.query('SELECT * FROM protocolos WHERE id = $1', [protocoloId]);
+
+    res.status(200).json({
+      message: "Certidão final anexada com sucesso. Fluxo de documentação concluído.",
+      protocolo: protocoloFinal.rows[0]
+    });
+
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error(`Erro ao anexar certidão final para o protocolo ${protocoloId}:`, error);
     res.status(500).json({ error: 'Erro interno do servidor.' });
   } finally {
     client.release();
