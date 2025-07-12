@@ -3,12 +3,16 @@ const cron = require('node-cron');
 const db = require('../db');
 const { notificationService } = require('./index');
 
+// --- Importando os serviços externos ---
+const { revogarAcessoDeclarantesExpirados } = require('./revocationService');
+// Se você tiver outros serviços para os outros jobs, importe-os aqui também.
+
 // ===================================================================================
 // FUNÇÃO PARA ENCERRAR PROTOCOLOS FINALIZADOS (Fallback de 72h)
 // ===================================================================================
 async function encerrarProtocolosFinalizados() {
   console.log('[CRON] Verificando protocolos finalizados para encerrar (fallback de 72h)...');
-  const client = await db.getClient();
+  const client = await db.getClient(); // Assumindo que db.getClient() existe
   try {
     const tempoLimite = '72 hours';
     const query = `
@@ -89,55 +93,24 @@ async function verificarInacaoCartorio() {
   }
 }
 
-// ===================================================================================
-// FUNÇÃO PARA REVOGAÇÃO DE ACESSO (LGPD)
-// ===================================================================================
-async function revogarAcessoDeclarante() {
-  console.log('[CRON] Verificando acesso de declarantes para revogação (30 dias após encerramento)...');
-  const client = await db.getClient();
-  try {
-    const tempoLimite = '30 days';
-    const dataLimite = new Date();
-    dataLimite.setDate(dataLimite.getDate() - 30);
-
-    const query = `
-      UPDATE usuarios u
-      SET acesso_revogado = TRUE
-      FROM protocolos p
-      WHERE 
-        u.id = p.decl_id AND
-        u.role = 'DECL' AND
-        p.status = 'encerrado' AND
-        p.data_encerramento < $1
-      RETURNING u.id;
-    `;
-    
-    const res = await client.query(query, [dataLimite]);
-
-    if (res.rowCount > 0) {
-      const idsRevogados = res.rows.map(r => r.id).join(', ');
-      console.log(`[CRON] Acesso revogado para ${res.rowCount} declarantes: ${idsRevogados}.`);
-    }
-  } catch (err) {
-    console.error('[CRON] Erro ao revogar acesso de declarantes:', err);
-  } finally {
-    client.release();
-  }
-}
 
 // ===================================================================================
 // INICIALIZADOR DAS TAREFAS AGENDADAS
 // ===================================================================================
 function initScheduledJobs() {
   // Para teste, mude para '* * * * *'
-  cron.schedule('0 * * * *', () => { 
+  cron.schedule('0 * * * *', () => { // Mantido para rodar a cada minuto para teste
     console.log('--- [CRON] Iniciando ciclo de tarefas agendadas ---');
     encerrarProtocolosFinalizados();
     verificarInacaoCartorio();
     limparDadosSensiveis();
-    revogarAcessoDeclarante();
+    
+    // --- CHAMADA CORRETA PARA O SERVIÇO DE REVOGAÇÃO ---
+    revogarAcessoDeclarantesExpirados(); 
+    
+    console.log('--- [CRON] Ciclo de tarefas agendadas concluído ---');
   });
-  console.log('Tarefas agendadas (Encerramento, Inação, Limpeza e Revogação) para rodar a cada hora.');
+  console.log('Tarefas agendadas (Encerramento, Inação, Limpeza e Revogação) para rodar a cada minuto para teste.');
 }
 
 module.exports = { initScheduledJobs };
