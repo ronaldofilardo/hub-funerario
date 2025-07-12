@@ -1,14 +1,10 @@
-// controllers/protocoloController.js
-
-const { protocoloService } = require('../services'); // Apenas o service é necessário
+// /controllers/protocoloController.js
 
 class ProtocoloController {
-  constructor() {
-    // O service agora é injetado no construtor do service, não aqui.
-    // Esta classe agora é stateless em relação a dependências diretas.
-    this.protocoloService = protocoloService; // Usando a instância importada
+  constructor(protocoloService) {
+    this.protocoloService = protocoloService;
 
-    // Garante o 'this' correto
+    // Binds para garantir o 'this' correto
     this.criarProtocolo = this.criarProtocolo.bind(this);
     this.listarTodos = this.listarTodos.bind(this);
     this.buscarPorId = this.buscarPorId.bind(this);
@@ -31,49 +27,40 @@ class ProtocoloController {
     res.status(statusCode).json({ error: errorMessage });
   }
 
+  // --- Métodos de Rota ---
   async criarProtocolo(req, res) {
     try {
       const protocolo = await this.protocoloService.criarProtocolo(req.body, req.files, req.user);
       res.status(201).json({ message: "Protocolo e documentos criados com sucesso!", protocolo });
-    } catch (error) {
-      this._handleError(res, error);
-    }
+    } catch (error) { this._handleError(res, error); }
   }
   
   async listarTodos(req, res) {
     try {
       const protocolos = await this.protocoloService.listarTodos();
       res.status(200).json(protocolos);
-    } catch (error) {
-      this._handleError(res, error);
-    }
+    } catch (error) { this._handleError(res, error); }
   }
 
   async buscarPorId(req, res) {
     try {
       const protocolo = await this.protocoloService.buscarPorId(req.params.id);
       res.status(200).json(protocolo);
-    } catch (error) {
-      this._handleError(res, error);
-    }
+    } catch (error) { this._handleError(res, error); }
   }
 
   async atualizarParcialmente(req, res) {
     try {
         const protocolo = await this.protocoloService.atualizarParcialmente(req.params.id, req.body);
         res.status(200).json(protocolo);
-    } catch (error) {
-        this._handleError(res, error);
-    }
+    } catch (error) { this._handleError(res, error); }
   }
 
   async confirmarValidacao(req, res) {
     try {
         const protocolo = await this.protocoloService.confirmarValidacao(req.params.id, req.user);
         res.status(200).json(protocolo);
-    } catch (error) {
-        this._handleError(res, error);
-    }
+    } catch (error) { this._handleError(res, error); }
   }
 
   async designarStakeholders(req, res) {
@@ -81,45 +68,35 @@ class ProtocoloController {
         const { fun_id, cart_id } = req.body;
         const protocolo = await this.protocoloService.designarStakeholders(req.params.id, fun_id, cart_id, req.user);
         res.status(200).json(protocolo);
-    } catch (error) {
-        this._handleError(res, error);
-    }
+    } catch (error) { this._handleError(res, error); }
   }
   
   async enviarFaf(req, res) {
     try {
         const protocolo = await this.protocoloService.enviarFaf(req.params.id, req.file, req.user);
         res.status(200).json({ message: "FAF enviada com sucesso e protocolo atualizado.", protocolo });
-    } catch (error) {
-        this._handleError(res, error);
-    }
+    } catch (error) { this._handleError(res, error); }
   }
 
   async atualizarProgressoFuneral(req, res) {
     try {
         const resultado = await this.protocoloService.atualizarProgressoFuneral(req.params.id, req.body, req.user);
         res.status(200).json({ message: "Progresso do funeral atualizado com sucesso.", ...resultado });
-    } catch (error) {
-        this._handleError(res, error);
-    }
+    } catch (error) { this._handleError(res, error); }
   }
 
   async enviarMinuta(req, res) {
     try {
         const protocolo = await this.protocoloService.enviarMinuta(req.params.id, req.file, req.user);
         res.status(200).json({ message: "Minuta enviada com sucesso para aprovação do declarante.", protocolo });
-    } catch (error) {
-        this._handleError(res, error);
-    }
+    } catch (error) { this._handleError(res, error); }
   }
 
   async aceitarMinuta(req, res) {
     try {
         const protocolo = await this.protocoloService.aceitarMinuta(req.params.id, req.user);
         res.status(200).json({ message: "Minuta aceita com sucesso. Cartório notificado para prosseguir.", protocolo });
-    } catch (error) {
-        this._handleError(res, error);
-    }
+    } catch (error) { this._handleError(res, error); }
   }
 
   async recusarMinuta(req, res) {
@@ -127,30 +104,27 @@ class ProtocoloController {
         const { observacoes } = req.body;
         const protocolo = await this.protocoloService.recusarMinuta(req.params.id, observacoes, req.user);
         res.status(200).json({ message: "Minuta recusada com sucesso. Cartório notificado para realizar as correções.", protocolo });
-    } catch (error) {
-        this._handleError(res, error);
-    }
+    } catch (error) { this._handleError(res, error); }
   }
 
   async definirPrevisaoRetirada(req, res) {
     try {
         const { data_previsao_retirada } = req.body;
-        const protocolo = await this.protocoloService.definirPrevisaoRetirada(req.params.id, data_previsao_retirada);
+        const protocolo = await this.protocoloService.definirPrevisaoRetirada(req.params.id, data_previsao_retirada, req.user);
         res.status(200).json({ message: "Previsão de retirada da certidão definida com sucesso. Declarante notificado.", protocolo });
-    } catch (error) {
-        this._handleError(res, error);
-    }
+    } catch (error) { this._handleError(res, error); }
   }
 
   async anexarCertidaoFinal(req, res) {
     try {
-        const protocolo = await this.protocoloService.anexarCertidaoFinal(req.params.id, req.file);
-        res.status(200).json({ message: "Certidão final anexada com sucesso. Fluxo de documentação concluído.", protocolo });
-    } catch (error) {
-        this._handleError(res, error);
-    }
+        const protocolo = await this.protocoloService.anexarCertidaoFinal(req.params.id, req.file, req.user);
+        res.status(200).json({ 
+            message: "Certidão final anexada com sucesso. Fluxo de documentação concluído.", 
+            protocolo: protocolo
+        });
+    } catch (error) { this._handleError(res, error); }
   }
 }
 
-// Exporta uma instância única do controller para ser usada nas rotas
-module.exports = new ProtocoloController();
+// CORREÇÃO: Exporta a CLASSE.
+module.exports = ProtocoloController;

@@ -1,14 +1,16 @@
-const ProtocoloService = require('./protocoloService');
-const NotificationService = require('./notificationService');
+// /services/index.js
 
-// Instancia o serviço que não tem dependências primeiro
+const NotificationService = require('./notificationService');
+const ProtocoloService = require('./protocoloService'); // Importa a CLASSE
+
+// 1. Cria a instância do serviço de notificação
 const notificationService = new NotificationService();
 
-// Agora, instancia o serviço de protocolo, injetando a dependência
+// 2. Cria a instância do serviço de protocolo, injetando a dependência
 const protocoloService = new ProtocoloService(notificationService);
 
-// Exporta as instâncias prontas para uso
+// 3. Exporta as INSTÂNCIAS prontas para uso
 module.exports = {
+  notificationService,
   protocoloService,
-  notificationService
 };
