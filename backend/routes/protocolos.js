@@ -6,11 +6,7 @@ const router = express.Router();
 // 1. Importações primeiro
 const upload = require('../multerConfig');
 const authMiddleware = require('../middleware/authMiddleware');
-const ProtocoloController = require('../controllers/protocoloController');
-const { protocoloService } = require('../services');
-
-// 2. Criação de instâncias
-const protocoloController = new ProtocoloController(protocoloService);
+const protocoloController = require('../controllers/protocoloController');
 
 // 3. Definição de middlewares de upload específicos
 const cpUpload = upload.fields([

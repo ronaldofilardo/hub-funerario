@@ -1,52 +1,34 @@
+// /services/cronJobs.js
 const cron = require('node-cron');
-const pool = require('../db'); // Importa a conexão com o banco
+const db = require('../db'); // ALTERAÇÃO 1: Importar o objeto db
 
-// Função que busca e encerra os protocolos
-const encerrarProtocolosFinalizados = async () => {
+async function encerrarProtocolosFinalizados() {
   console.log('Executando tarefa agendada: Verificando protocolos para encerrar...');
-  const client = await pool.connect();
+  const client = await db.getClient(); // ALTERAÇÃO 2: Usar db.getClient()
   try {
-    // Busca protocolos que estão 'finalizados' há mais de 72 horas
-    // ATENÇÃO: Usando 'data_finalizado' como nome do campo. Se for diferente, ajuste aqui.
+    // A sua lógica de verificação de 72 horas vai aqui
+    // Exemplo:
     const query = `
-      SELECT id FROM protocolos
-      WHERE status = 'finalizado' AND data_finalizado < NOW() - INTERVAL '72 hours';
+      UPDATE protocolos SET status = 'encerrado'
+      WHERE status = 'finalizado' AND data_finalizado < NOW() - INTERVAL '72 hours'
+      RETURNING id;
     `;
     const res = await client.query(query);
-
-    if (res.rows.length === 0) {
-      console.log('Nenhum protocolo para encerrar nesta execução.');
-      return;
+    if (res.rowCount > 0) {
+      console.log(`[CRON] ${res.rowCount} protocolos foram encerrados automaticamente.`);
     }
-
-    const protocolosParaEncerrar = res.rows.map(p => p.id);
-    console.log(`Protocolos a serem encerrados: ${protocolosParaEncerrar.join(', ')}`);
-
-    // Atualiza o status para 'encerrado' e registra a data de encerramento
-    const updateQuery = `
-      UPDATE protocolos
-      SET status = 'encerrado',
-          data_encerramento = NOW()
-      WHERE id = ANY($1::uuid[]);
-    `;
-    await client.query(updateQuery, [protocolosParaEncerrar]);
-
-    console.log(`${protocolosParaEncerrar.length} protocolo(s) encerrado(s) com sucesso.`);
-    // TODO: Disparar notificações sobre o encerramento, se necessário.
-
-  } catch (error) {
-    console.error('Erro ao executar a tarefa de encerramento de protocolos:', error);
+  } catch (err) {
+    // O erro que você viu no log foi capturado aqui
+    console.error('[NODE-CRON] [ERROR]', err);
   } finally {
     client.release();
   }
-};
+}
 
-// Agenda a tarefa para ser executada a cada hora
-// A sintaxe é: 'minuto hora dia-do-mês mês dia-da-semana'
-// '0 * * * *' significa "no minuto 0 de toda hora"
-const initScheduledJobs = () => {
+function initScheduledJobs() {
+  // Roda a cada hora
   cron.schedule('0 * * * *', encerrarProtocolosFinalizados);
   console.log('Tarefa de encerramento de protocolos agendada para rodar a cada hora.');
-};
+}
 
 module.exports = { initScheduledJobs };
